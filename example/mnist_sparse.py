@@ -2,26 +2,77 @@ from __future__ import print_function
 import argparse
 import torch
 import spconv
+from spconv.modules import SparseModule
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import random
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
+import matplotlib.pyplot as plt
 
+class PrintLayer(nn.Module):
+    def __init__(self, id):
+        super(PrintLayer, self).__init__()
+        self.id = id
+    
+    def forward(self, x):
+        # Do your print / debug stuff here
+        print(self.id, type(x), x.shape)
+        return x
+
+class SparseZeroPad2d(SparseModule):
+    def __init__(self, pad):
+        super(SparseModule, self).__init__()
+        self.pad = pad
+
+    def forward(self, x):
+        w, h = x.spatial_shape
+        x.spatial_shape = torch.Size([w + 2 * self.pad, h + 2 * self.pad])
+        x.indices[:, 1] += self.pad
+        x.indices[:, 2] += self.pad
+        return x
+
+class SparseScale2d(SparseModule):
+    def __init__(self, scale):
+        super(SparseModule, self).__init__()
+        self.scale = scale
+
+    def forward(self, x):
+        w, h = x.spatial_shape
+        x.spatial_shape = torch.Size([w * self.scale, h * self.scale])
+        x.indices[:, 1:] = x.indices[:, 1:] * self.scale
+        return x
+
+def aug_data(data: torch.Tensor):
+    layers = [data, torch.zeros_like(data), torch.zeros_like(data)]
+    random.shuffle(layers)
+    return torch.cat(layers, 1)
 
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
+        self.szp = SparseZeroPad2d(1)
+        self.bn = nn.BatchNorm1d(3)
+        self.cv1 = spconv.SparseConv2d(3, 3, 5, 5)
+        self.ss1 = SparseScale2d(5)
+        self.cv2 = spconv.SparseConv2d(3, 3, 5, 5)
+        self.ss2 = SparseScale2d(5)
+        self.mp = spconv.SparseMaxPool2d(2, 2)
+        self.td = spconv.ToDense()
+
         self.net = spconv.SparseSequential(
-            nn.BatchNorm1d(1),
-            spconv.SparseConv2d(1, 32, 3, 1),
+            SparseZeroPad2d(1),
+            nn.BatchNorm1d(3),
+            spconv.SparseConv2d(3, 32, 3, 1),
             nn.ReLU(),
             spconv.SparseConv2d(32, 64, 3, 1),
             nn.ReLU(),
             spconv.SparseMaxPool2d(2, 2),
             spconv.ToDense(), 
         )
-        self.fc1 = nn.Linear(9216, 128)
+
+        self.fc1 = nn.Linear(10816, 128)
         self.fc2 = nn.Linear(128, 10)
         self.dropout1 = nn.Dropout2d(0.25)
         self.dropout2 = nn.Dropout2d(0.5)
@@ -29,10 +80,57 @@ class Net(nn.Module):
 
     def forward(self, x: torch.Tensor):
         # x: [N, 28, 28, 1], must be NHWC tensor
-        x_sp = spconv.SparseConvTensor.from_dense(x.reshape(-1, 28, 28, 1))
+        x = x.permute(0, 2, 3, 1)
+        # x = x.reshape(-1, 28, 28, 1)
+        # print("Before shape:",x.shape)
         # create SparseConvTensor manually: see SparseConvTensor.from_dense
-        x = self.net(x_sp)
+        x_sp = spconv.SparseConvTensor.from_dense(x)        
+
+        plt.title("Before pad " + str(x_sp.dense().shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+        
+        x_sp = self.szp(x_sp)
+        plt.title("After pad"+ str(x_sp.dense().shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+        x_sp.features = self.bn(x_sp.features)
+        print("After norm"+ str(x_sp.dense().shape))
+        plt.title("After norm"+ str(x_sp.dense().shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+        x_sp = self.cv1(x_sp)
+        x_sp = self.ss1(x_sp)
+        print("After cv1"+ str(x_sp.dense().shape))
+        plt.title("After cv1"+ str(x_sp.dense().shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+        x_sp.features = F.relu(x_sp.features)
+        plt.title("After relu"+ str(x_sp.dense().shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+        x_sp = self.cv2(x_sp)
+        x_sp = self.ss2(x_sp)
+        plt.title("After cv2"+ str(x_sp.dense().shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+        x_sp.features = F.relu(x_sp.features)
+        plt.title("After relu"+ str(x_sp.dense().shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+        x_sp = self.mp(x_sp)
+        plt.title("After max_pool"+ str(x_sp.dense().shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+        x = self.td(x_sp)
+        plt.title("After x"+ str(x.shape))
+        plt.imshow(x_sp.dense().permute(0, 2, 3, 1).cpu().detach().numpy()[0])
+        plt.show()
+
+        # x = self.net(x_sp)
+
         x = torch.flatten(x, 1)
+        print(x.shape)
         x = self.dropout1(x)
         x = self.fc1(x)
         x = F.relu(x)
@@ -43,8 +141,18 @@ class Net(nn.Module):
 
 
 def train(args, model, device, train_loader, optimizer, epoch):
+    print("device:", device)
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
+        # print((data != 0).sum())
+        # print(data.shape)
+        # im_data = data.permute(0,2,3,1)
+        # plt.imshow(im_data.detach().numpy().reshape(*im_data.shape[1:]))
+        # plt.show()
+        data = aug_data(data)
+        # im_data = data.permute(0,2,3,1)
+        # plt.imshow(im_data.detach().numpy()[0])
+        # plt.show()
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
@@ -64,6 +172,7 @@ def test(model, device, test_loader):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
+            data = aug_data(data)
             output = model(data)
             test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
@@ -79,7 +188,7 @@ def test(model, device, test_loader):
 def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
-    parser.add_argument('--batch-size', type=int, default=64, metavar='N',
+    parser.add_argument('--batch-size', type=int, default=1, metavar='N',
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
                         help='input batch size for testing (default: 1000)')

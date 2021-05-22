@@ -82,6 +82,14 @@ class SparseConvTensor(object):
         features_th = x.values()
         return cls(features_th, indices_th, spatial_shape, batch_size)
 
+    @classmethod
+    def from_sparse(cls, x: torch.Tensor):
+        spatial_shape = x.shape[1:-1]
+        batch_size = x.shape[0]
+        indices_th = x._indices().permute(1, 0).contiguous().int()
+        features_th = x._values()
+        return cls(features_th, indices_th, spatial_shape, batch_size)
+
     @property
     def spatial_size(self):
         return np.prod(self.spatial_shape)
